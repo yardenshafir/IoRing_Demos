@@ -1,3 +1,11 @@
+#include <ntstatus.h>
+#define WIN32_NO_STATUS
+#include <Windows.h>
+#include <ioringapi.h>
+#include <ntioring_x.h>
+#include <winternl.h>
+#include <intrin.h>
+
 //
 // Data structures
 //
@@ -10,8 +18,14 @@ typedef struct _NT_IORING_INFO
     ULONG SubQueueSizeMask;
     ULONG CompletionQueueSize;
     ULONG CompQueueSizeMask;
-    PIORING_QUEUE_HEAD SubQueueBase;
-    PVOID CompQueueBase;
+    union {
+        PIORING_SUB_QUEUE_HEAD SubQueueBase;
+        ULONG64 SubQueuePaddingForX86;
+    };
+    union {
+        PIORING_COMP_QUEUE_HEAD CompQueueBase;
+        ULONG64 CompQueuePaddingForX86;
+    };
 } NT_IORING_INFO, *PNT_IORING_INFO;
 
 typedef struct _IORING_BUFFER_INFO
@@ -44,47 +58,43 @@ typedef struct _IORING_OBJECT
 
 typedef struct _IORING_CQE
 {
-    UINT_PTR UserData;
+    ULONG64 UserData;
     HRESULT ResultCode;
-    ULONG_PTR Information;
+    ULONG64 Information;
 } IORING_CQE, *PIORING_CQE;
 
 typedef struct _NT_IORING_SQE
 {
     ULONG Opcode;
     ULONG Flags;
-    HANDLE FileRef;
+    union {
+        HANDLE FileRef;
+        ULONG64 FilePaddingForx86;
+    };
     LARGE_INTEGER FileOffset;
-    PVOID Buffer;
+    union {
+        PVOID Buffer;
+        ULONG64 BufferPaddingForX86;
+    };
     ULONG BufferSize;
     ULONG BufferOffset;
     ULONG Key;
-    PVOID UserData;
-    PVOID Padding[4];
+    ULONG64 UserData;
+    ULONG64 Padding[4];
 } NT_IORING_SQE, *PNT_IORING_SQE;
 
-typedef struct _IORING_QUEUE_HEAD
+typedef struct _IORING_SUB_QUEUE_HEAD
 {
-    ULONG QueueIndex;
-    ULONG QueueCount;
-    ULONG64 Aligment;
-} IORING_QUEUE_HEAD, *PIORING_QUEUE_HEAD;
+    ULONG QueueHead;
+    ULONG QueueTail;
+    ULONG64 Padding;
+} IORING_SUB_QUEUE_HEAD, *PIORING_SUB_QUEUE_HEAD;
 
 typedef struct _IORING_COMP_QUEUE_HEAD
 {
-    ULONG QueueIndex;
-    ULONG QueueCount;
+    ULONG QueueHead;
+    ULONG QueueTail;
 } IORING_COMP_QUEUE_HEAD, * PIORING_COMP_QUEUE_HEAD;
-
-enum IORING_OP_CODE
-{
-  IORING_OP_NOP = 0x0,
-  IORING_OP_READ = 0x1,
-  IORING_OP_REGISTER_FILES = 0x2,
-  IORING_OP_REGISTER_BUFFERS = 0x3,
-  IORING_OP_CANCEL = 0x4,
-  IORING_OP_WRITE = 0x5,
-};
 
 typedef struct _NT_IORING_CAPABILITIES
 {
@@ -107,7 +117,9 @@ typedef struct _HIORING
 //
 // Function definitions
 //
+EXTERN_C
 NTSTATUS
+NTAPI
 NtSubmitIoRing (
     _In_ HANDLE Handle,
     _In_ IORING_CREATE_REQUIRED_FLAGS Flags,
@@ -115,23 +127,29 @@ NtSubmitIoRing (
     _In_ PLARGE_INTEGER Timeout
 	);
 
+EXTERN_C
 NTSTATUS
+NTAPI
 NtCreateIoRing (
     _Out_ PHANDLE pIoRingHandle,
     _In_ ULONG CreateParametersSize,
     _In_ PIO_RING_STRUCTV1 CreateParameters,
     _In_ ULONG OutputParametersSize,
-    _In_ NT_IORING_INFO* pRingInfo
+    _In_ PNT_IORING_INFO pRingInfo
 	);
 
+EXTERN_C
 NTSTATUS
+NTAPI
 NtQueryIoRingCapabilities (
 	_In_ SIZE_T CapabilitiesLength,
 	_Out_ PNT_IORING_CAPABILITIES Capabilities
 	);
 
+EXTERN_C
 NTSTATUS
-NtSetInformationIoRing(
+NTAPI
+NtSetInformationIoRing (
 	_In_ HANDLE Handle,
 	_In_ ULONG InformationClass,
 	_In_ ULONG InformationLength,
