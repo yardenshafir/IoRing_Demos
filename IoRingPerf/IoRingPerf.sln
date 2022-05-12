@@ -5,6 +5,8 @@ VisualStudioVersion = 16.0.31515.178
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "IoRingPerf", "IoRingPerf\IoRingPerf.vcxproj", "{CAA5E04E-FE0A-4199-AFC9-5614E37BED44}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "IoRingUserCompletionEvent", "IoRingUserCompletionEvent\IoRingUserCompletionEvent.vcxproj", "{4DEE94B6-3534-47B9-870D-B82E028F3A85}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -21,6 +23,14 @@ Global
 		{CAA5E04E-FE0A-4199-AFC9-5614E37BED44}.Release|x64.Build.0 = Release|x64
 		{CAA5E04E-FE0A-4199-AFC9-5614E37BED44}.Release|x86.ActiveCfg = Release|Win32
 		{CAA5E04E-FE0A-4199-AFC9-5614E37BED44}.Release|x86.Build.0 = Release|Win32
+		{4DEE94B6-3534-47B9-870D-B82E028F3A85}.Debug|x64.ActiveCfg = Debug|x64
+		{4DEE94B6-3534-47B9-870D-B82E028F3A85}.Debug|x64.Build.0 = Debug|x64
+		{4DEE94B6-3534-47B9-870D-B82E028F3A85}.Debug|x86.ActiveCfg = Debug|Win32
+		{4DEE94B6-3534-47B9-870D-B82E028F3A85}.Debug|x86.Build.0 = Debug|Win32
+		{4DEE94B6-3534-47B9-870D-B82E028F3A85}.Release|x64.ActiveCfg = Release|x64
+		{4DEE94B6-3534-47B9-870D-B82E028F3A85}.Release|x64.Build.0 = Release|x64
+		{4DEE94B6-3534-47B9-870D-B82E028F3A85}.Release|x86.ActiveCfg = Release|Win32
+		{4DEE94B6-3534-47B9-870D-B82E028F3A85}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
