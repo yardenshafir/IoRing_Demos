@@ -199,12 +199,12 @@ void LegacyNtReadFile ()
     }
     CreateListOfFiles(sizeToRead, &fileData, &numberOfEntries, FALSE);
 
-    start = clock();
+    start = __rdtsc();
     for (int i = 0; i < numberOfEntries; i++)
     {
         status = NtReadFile(fileData[i].FileHandle, NULL, NULL, NULL, &iosb, fileData[i].Buffer, sizeToRead, 0, NULL);
     }
-    end = clock();
+    end = __rdtsc();
     printf("NT read file time: %d\n", end - start);
 
 Exit:
