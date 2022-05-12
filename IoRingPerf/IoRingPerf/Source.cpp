@@ -18,16 +18,16 @@ typedef struct _IO_RING_STRUCTV1
 
 typedef struct _IORING_QUEUE_HEAD
 {
-    ULONG QueueIndex;
-    ULONG QueueCount;
-    ULONG64 Aligment;
-} IORING_QUEUE_HEAD, * PIORING_QUEUE_HEAD;
+    ULONG Head;
+    ULONG Tail;
+    ULONG64 Flags;
+} IORING_QUEUE_HEAD, *PIORING_QUEUE_HEAD;
 
 typedef struct _IORING_COMP_QUEUE_HEAD
 {
-    ULONG QueueIndex;
-    ULONG QueueCount;
-} IORING_COMP_QUEUE_HEAD, * PIORING_COMP_QUEUE_HEAD;
+    ULONG Head;
+    ULONG Tail;
+} IORING_COMP_QUEUE_HEAD, *PIORING_COMP_QUEUE_HEAD;
 
 typedef struct _NT_IORING_INFO
 {
@@ -38,24 +38,29 @@ typedef struct _NT_IORING_INFO
     ULONG CompletionQueueSize;
     ULONG CompQueueSizeMask;
     PIORING_QUEUE_HEAD SubQueueBase;
-    PVOID CompQueueBase;
+    PIORING_COMP_QUEUE_HEAD CompQueueBase;
 } NT_IORING_INFO, * PNT_IORING_INFO;
 
+//
+// Update: 22H2 SQE structure
+//
 typedef struct _NT_IORING_SQE
 {
-    ULONG Opcode;
+    ULONG OpCode;
     ULONG Flags;
+    union
+    {
+        ULONG64 UserData;
+        ULONG64 PaddingUserDataForWow;
+    };
+    enum _NT_IORING_OP_FLAGS CommonOpFlags;
+    ULONG Padding;
     HANDLE FileRef;
-    LARGE_INTEGER FileOffset;
     PVOID Buffer;
-    ULONG BufferSize;
-    ULONG BufferOffset;
+    ULONG64 Offset;
+    ULONG Length;
     ULONG Key;
-    PVOID UserData;
-    PVOID stuff1;
-    PVOID stuff2;
-    PVOID stuff3;
-    PVOID stuff4;
+    ULONG64 padding;
 } NT_IORING_SQE, * PNT_IORING_SQE;
 
 typedef struct _FILE_DATA {
@@ -401,24 +406,22 @@ void IoRingNt()
         printf("Failed creating IO ring handle: 0x%x\n", status);
         goto Exit;
     }
-
-    ioringInfo.SubQueueBase->QueueCount = numberOfEntries;
-    ioringInfo.SubQueueBase->QueueIndex = 0;
-    ioringInfo.SubQueueBase->Aligment = 0;
+    ioringInfo.SubQueueBase->Tail = numberOfEntries;
+    ioringInfo.SubQueueBase->Head = 0;
+    ioringInfo.SubQueueBase->Flags = 0;
 
     sqe = (PNT_IORING_SQE)((ULONG64)ioringInfo.SubQueueBase + sizeof(IORING_QUEUE_HEAD));
 
     for (int i = 0; i < numberOfEntries; i++)
     {
-        sqe[i].Opcode = 1;
+        sqe[i].OpCode = 1;
         sqe[i].Flags = 0;
         sqe[i].FileRef = fileData[i].FileHandle;
-        sqe[i].FileOffset.QuadPart = 0;
+        sqe[i].Offset = 0;
         sqe[i].Buffer = fileData[i].Buffer;
-        sqe[i].BufferOffset = 0;
-        sqe[i].BufferSize = sizeToRead;
+        sqe[i].Length = sizeToRead;
         sqe[i].Key = 1234;
-        sqe[i].UserData = nullptr;
+        sqe[i].UserData = 0;
     }
 
     timeout.QuadPart = 0;
@@ -431,31 +434,26 @@ void IoRingNt()
         goto Exit;
     }
 
-    cqe = (IORING_CQE*)((ULONG64)ioringInfo.CompQueueBase + sizeof(IORING_COMP_QUEUE_HEAD));
+    cqe = (IORING_CQE*)(ioringInfo.CompQueueBase + 1);
     sum = 0;
-    for (int i = 0; i < numberOfEntries; i++)
+    while (ioringInfo.CompQueueBase->Head != ioringInfo.CompQueueBase->Tail)
     {
-        if (cqe[i].ResultCode == STATUS_SUCCESS)
+        if (cqe[ioringInfo.CompQueueBase->Head].ResultCode == STATUS_SUCCESS)
         {
-            for (PBYTE b = (PBYTE)fileData[i].Buffer; (ULONG64)b < (ULONG64)(fileData[i].Buffer) + sizeToRead; b++)
+            for (PBYTE b = (PBYTE)fileData[ioringInfo.CompQueueBase->Head].Buffer;
+                (ULONG64)b < (ULONG64)(fileData[ioringInfo.CompQueueBase->Head].Buffer) + sizeToRead;
+                b++)
             {
-                fileData[i].SumOfBytes += *b;
+                fileData[ioringInfo.CompQueueBase->Head].SumOfBytes += *b;
             }
-            sum += fileData[i].SumOfBytes;
+            sum += fileData[ioringInfo.CompQueueBase->Head].SumOfBytes;
+            ioringInfo.CompQueueBase->Head++;
         }
     }
 
     end = __rdtsc();
     printf("time IO Ring NT: %lld\n", end - start);
     printf("\tSum: %lld\n", sum);
-
-    /*printf("Data from file:\n");
-    endOfBuffer = (ULONG64)buffer + sizeToRead;
-    for (; (ULONG64)buffer < endOfBuffer; buffer++)
-    {
-        printf("%p ", *buffer);
-    }
-    printf("\n");*/
 
 Exit:
     if (handle != NULL)
@@ -535,8 +533,6 @@ void IoRingKernelBase()
         }
     }
 
-    //result = BuildIoRingRegisterFileHandles(handle, i, fileHandles, NULL);
-
     start = __rdtsc();
     result = SubmitIoRing(handle, 0, 0, &submittedEntries);
     if (!SUCCEEDED(result))
@@ -561,14 +557,6 @@ void IoRingKernelBase()
     end = __rdtsc();
     printf("time IO Ring KernelBase: %lld\n", end - start);
     printf("\tSum: %lld\n", sum);
-
-    /*printf("Data from file:\n");
-    endOfBuffer = (ULONG64)buffer + sizeToRead;
-    for (; (ULONG64)buffer < endOfBuffer; buffer++)
-    {
-        printf("%p ", *buffer);
-    }
-    printf("\n");*/
 
 Exit:
     if (handle != NULL)
@@ -598,19 +586,7 @@ int main()
     LegacyReadFileEx();
     IoRingKernelBase();
     IoRingNt();
-    
-    //LegacyNtReadFile();
+    LegacyNtReadFile();
 
     ExitProcess(0);
 }
-
-
-
-/*
-NT-KB-LG
-KB-LG-NT
-LG-NT-KB
-NT-LG-KB
-KB-NT-LG
-LG-KB-NT
-*/
