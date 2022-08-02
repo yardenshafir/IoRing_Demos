@@ -68,6 +68,7 @@ typedef struct _FILE_DATA {
     LARGE_INTEGER Size;
     PVOID Buffer;
     ULONG64 SumOfBytes;
+    LARGE_INTEGER Offset;
 } FILE_DATA, *PFILE_DATA;
 
 EXTERN_C_START
@@ -85,7 +86,7 @@ NtCreateIoRing (
     _In_ ULONG CreateParametersSize,
     _In_ PIO_RING_STRUCTV1 CreateParameters,
     _In_ ULONG OutputParametersSize,
-    _In_ NT_IORING_INFO* pRingInfo
+    _Out_ NT_IORING_INFO* pRingInfo
 );
 
 NTSTATUS
@@ -108,7 +109,8 @@ NtReadFile (
 
 EXTERN_C_END
 
-void CompletionRoutine (
+void
+CompletionRoutine (
     DWORD dwErrorCode,
     DWORD dwNumberOfBytesTransfered,
     LPOVERLAPPED lpOverlapped
@@ -116,11 +118,77 @@ void CompletionRoutine (
 
 ULONG g_filesCompleted = 0;
 
-void CreateListOfFiles (
-    ULONG SizeToRead,
-    PFILE_DATA* FileData,
-    PULONG Length,
-    BOOLEAN Overlapped
+HRESULT
+CreateListForSingleFile (
+    _In_ ULONG SizeToRead,
+    _In_ ULONG NumberOfEntries,
+    _In_ BOOLEAN Overlapped,
+    _Out_ PFILE_DATA* FileData
+)
+{
+    PFILE_DATA fileData;
+    ULONG flagsAndAttributes;
+    HANDLE hFile = NULL;
+    DWORD fileSize;
+
+    *FileData = nullptr;
+
+    if (NumberOfEntries == 0)
+    {
+        return ERROR_INVALID_INDEX;
+    }
+
+    fileData = (PFILE_DATA)VirtualAlloc(NULL,
+                                        NumberOfEntries * sizeof(FILE_DATA),
+                                        MEM_COMMIT,
+                                        PAGE_READWRITE);
+    if (fileData == NULL)
+    {
+        printf("Failed allocating memory\n");
+        return ERROR_INSUFFICIENT_VIRTUAL_ADDR_RESOURCES;
+    }
+    flagsAndAttributes = FILE_ATTRIBUTE_NORMAL;
+    if (Overlapped)
+    {
+        flagsAndAttributes |= FILE_FLAG_OVERLAPPED;
+    }
+
+    //
+    // Pick combase.dll as a random file that'll always be there. Why? No actual reason
+    //
+    hFile = CreateFile(L"C:\\Windows\\System32\\combase.dll",
+                       GENERIC_READ,
+                       0,
+                       NULL,
+                       OPEN_EXISTING,
+                       flagsAndAttributes,
+                       NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        return ERROR_INVALID_HANDLE;
+    }
+    GetFileSize(hFile, &fileSize);
+
+    for (ULONG i = 0; i < NumberOfEntries; i++)
+    {
+        fileData[i].FileHandle = hFile;
+        fileData[i].Size.QuadPart = fileSize;
+        fileData[i].Offset.QuadPart = rand() % (fileSize - SizeToRead);
+        fileData[i].Buffer = VirtualAlloc(NULL,
+                                          SizeToRead,
+                                          MEM_COMMIT,
+                                          PAGE_READWRITE);
+    }
+    *FileData = fileData;
+    return S_OK;
+}
+
+HRESULT
+CreateListOfFilesFromDir (
+    _In_ ULONG SizeToRead,
+    _Out_ PFILE_DATA* FileData,
+    _Out_ PULONG NumberOfFileHandles,
+    _In_ BOOLEAN Overlapped
 )
 {
     HANDLE hFind = NULL;
@@ -129,8 +197,24 @@ void CreateListOfFiles (
     wchar_t* path;
     HANDLE hFile = NULL;
     int i = 0;
-    PFILE_DATA fileData = *FileData;
+    PFILE_DATA fileData;
     ULONG flagsAndAttributes;
+
+    if ((NumberOfFileHandles == nullptr) || (FileData == nullptr))
+    {
+        printf("Invalid parameter\n");
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    *FileData = nullptr;
+    *NumberOfFileHandles = 0;
+
+    fileData = (PFILE_DATA)VirtualAlloc(NULL, 0x10000 * sizeof(FILE_DATA), MEM_COMMIT, PAGE_READWRITE);
+    if (fileData == NULL)
+    {
+        printf("Failed allocating memory\n");
+        return ERROR_INSUFFICIENT_VIRTUAL_ADDR_RESOURCES;
+    }
 
     flagsAndAttributes = FILE_ATTRIBUTE_NORMAL;
     if (Overlapped)
@@ -143,7 +227,10 @@ void CreateListOfFiles (
         do {
             if (hFind != INVALID_HANDLE_VALUE)
             {
-                path = (wchar_t*)VirtualAlloc(NULL, lstrlenW(dir) + lstrlenW(data.cFileName), MEM_COMMIT, PAGE_READWRITE);
+                path = (wchar_t*)VirtualAlloc(NULL,
+                                              (ULONG64)lstrlenW(dir) + (ULONG64)lstrlenW(data.cFileName),
+                                              MEM_COMMIT,
+                                              PAGE_READWRITE);
                 if (path == NULL)
                 {
                     continue;
@@ -151,12 +238,12 @@ void CreateListOfFiles (
                 lstrcpyW(path, dir);
                 lstrcatW(path, data.cFileName);
                 hFile = CreateFile(path,
-                    GENERIC_READ,
-                    0,
-                    NULL,
-                    OPEN_EXISTING,
-                    flagsAndAttributes,
-                    NULL);
+                                   GENERIC_READ,
+                                   0,
+                                   NULL,
+                                   OPEN_EXISTING,
+                                   flagsAndAttributes,
+                                   NULL);
                 VirtualFree(path, NULL, MEM_RELEASE);
                 if (hFile == INVALID_HANDLE_VALUE)
                 {
@@ -165,54 +252,129 @@ void CreateListOfFiles (
 
                 fileData[i].FileHandle = hFile;
                 fileData[i].Size.HighPart = data.nFileSizeHigh;
-                fileData[i].Size.HighPart = data.nFileSizeLow;
+                fileData[i].Size.LowPart = data.nFileSizeLow;
+                fileData[i].Offset.QuadPart = rand() % (fileData[i].Size.HighPart - SizeToRead);
                 fileData[i].Buffer = VirtualAlloc(NULL,
-                    SizeToRead,
-                    MEM_COMMIT,
-                    PAGE_READWRITE);
-                
-
+                                                  SizeToRead,
+                                                  MEM_COMMIT,
+                                                  PAGE_READWRITE);
                 i++;
             }
         } while (FindNextFile(hFind, &data));
         FindClose(hFind);
     }
-    *Length = i;
+    *FileData = fileData;
+    *NumberOfFileHandles = i;
+    return S_OK;
 }
 
-void LegacyNtReadFile ()
+HRESULT
+CreateListOfFiles (
+    _In_ ULONG SizeToRead,
+    _In_opt_ ULONG NumberOfEntries,
+    _Out_ PULONG NumberOfFileHandles,
+    _Out_ PFILE_DATA* FileData,
+    _In_ BOOLEAN Overlapped,
+    _In_ BOOLEAN OpenFilesFromDirectory
+)
 {
+    HRESULT result;
+    if ((NumberOfFileHandles == nullptr) || (FileData == nullptr))
+    {
+        printf("Invalid parameter\n");
+        return ERROR_INVALID_PARAMETER;
+    }
+    *NumberOfFileHandles = 0;
+    *FileData = nullptr;
+
+    if (OpenFilesFromDirectory != FALSE)
+    {
+        if (NumberOfFileHandles == 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        return CreateListOfFilesFromDir(SizeToRead, FileData, NumberOfFileHandles, Overlapped);
+    }
+    else
+    {
+        result = CreateListForSingleFile(SizeToRead, NumberOfEntries, Overlapped, FileData);
+        if (SUCCEEDED(result))
+        {
+            *NumberOfFileHandles = NumberOfEntries;
+        }
+        return result;
+    }
+}
+
+void
+LegacyNtReadFile (
+    _In_ BOOLEAN ReadMultipleFiles
+    )
+{
+    HRESULT result;
     ULONG sizeToRead = 0x100000;
     PFILE_DATA fileData;
     ULONG numberOfEntries;
-    ULONG bytesRead;
     NTSTATUS status;
     IO_STATUS_BLOCK iosb;
-    clock_t start;
-    clock_t end;
+    ULONG64 start;
+    ULONG64 end;
+    ULONG64 sum;
 
-    fileData = (PFILE_DATA)VirtualAlloc(NULL, 0x10000 * sizeof(FILE_DATA), MEM_COMMIT, PAGE_READWRITE);
-    if (fileData == NULL)
+    sum = 0;
+    numberOfEntries = 5000;
+    result = CreateListOfFiles(sizeToRead,
+                               numberOfEntries,
+                               &numberOfEntries,
+                               &fileData,
+                               TRUE,
+                               ReadMultipleFiles);
+    if (!SUCCEEDED(result))
     {
-        printf("Failed allocating memory\n");
+        printf("failed to create list of file handles");
         goto Exit;
     }
-    CreateListOfFiles(sizeToRead, &fileData, &numberOfEntries, FALSE);
 
     start = __rdtsc();
-    for (int i = 0; i < numberOfEntries; i++)
+    for (ULONG i = 0; i < numberOfEntries; i++)
     {
-        status = NtReadFile(fileData[i].FileHandle, NULL, NULL, NULL, &iosb, fileData[i].Buffer, sizeToRead, 0, NULL);
+        status = NtReadFile(fileData[i].FileHandle,
+                            NULL,
+                            NULL,
+                            NULL,
+                            &iosb,
+                            fileData[i].Buffer,
+                            sizeToRead,
+                            (PLARGE_INTEGER)&fileData[i].Offset,
+                            NULL);
+        if (!NT_SUCCESS(status))
+        {
+            printf("NtReadFile failed: %x\n", status);
+        }
+        fileData[i].SumOfBytes = 0;
+        for (PBYTE b = (PBYTE)fileData[i].Buffer; (ULONG64)b < (ULONG64)(fileData[i].Buffer) + sizeToRead; b++)
+        {
+            fileData[i].SumOfBytes += *b;
+        }
+        sum += fileData[i].SumOfBytes;
     }
     end = __rdtsc();
-    printf("NT read file time: %d\n", end - start);
+    printf("NT read file time: %lld\n", end - start);
+    printf("\tSum: %lld\n", sum);
 
 Exit:
     if (fileData)
     {
-        for (int i = 0; i < numberOfEntries; i++)
+        if ((ReadMultipleFiles == FALSE) && (fileData[0].FileHandle))
         {
-            if (fileData[i].FileHandle)
+            //
+            // Only close the handle once
+            //
+            NtClose(fileData[0].FileHandle);
+        }
+        for (ULONG64 i = 0; i < numberOfEntries; i++)
+        {
+            if ((ReadMultipleFiles != FALSE) & (fileData[i].FileHandle != 0))
             {
                 NtClose(fileData[i].FileHandle);
             }
@@ -225,7 +387,8 @@ Exit:
     }
 }
 
-void CompletionRoutine (
+void
+CompletionRoutine (
     DWORD dwErrorCode,
     DWORD dwNumberOfBytesTransfered,
     LPOVERLAPPED lpOverlapped
@@ -237,34 +400,63 @@ void CompletionRoutine (
     g_filesCompleted++;
 }
 
-void LegacyReadFile()
+void
+LegacyReadFile (
+    _In_ BOOLEAN ReadMultipleFiles
+    )
 {
     ULONG sizeToRead = 0x100000;
     PFILE_DATA fileData;
     ULONG numberOfEntries;
     ULONG bytesRead;
     HRESULT result;
-    OVERLAPPED* pOverlapped = new OVERLAPPED;
-    __int64 start;
-    __int64 end;
+    OVERLAPPED overlapped = { 0 };
+    ULONG64 start;
+    ULONG64 end;
     ULONG64 sum;
 
-    fileData = (PFILE_DATA)VirtualAlloc(NULL, 0x10000 * sizeof(FILE_DATA), MEM_COMMIT, PAGE_READWRITE);
-    if (fileData == NULL)
+    numberOfEntries = 5000;
+    result = CreateListOfFiles(sizeToRead,
+                               numberOfEntries,
+                               &numberOfEntries,
+                               &fileData,
+                               TRUE,
+                               ReadMultipleFiles);
+    if (!SUCCEEDED(result))
     {
-        printf("Failed allocating memory\n");
+        printf("failed to create list of file handles");
         goto Exit;
     }
-    CreateListOfFiles(sizeToRead, &fileData, &numberOfEntries, FALSE);
+
+    overlapped.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
 
     start = __rdtsc();
     sum = 0;
-    for (int i = 0; i < numberOfEntries; i++)
+    for (ULONG i = 0; i < numberOfEntries; i++)
     {
-        result = ReadFile(fileData[i].FileHandle, fileData[i].Buffer, sizeToRead, &bytesRead, NULL);
-        if (FAILED(result))
+        overlapped.OffsetHigh = fileData[i].Offset.HighPart;
+        overlapped.Offset = fileData[i].Offset.LowPart;
+        if (ReadFile(fileData[i].FileHandle, fileData[i].Buffer, sizeToRead, &bytesRead, &overlapped) == FALSE)
         {
-            printf("ReadFile failed\n");
+            result = GetLastError();
+            if (result != ERROR_IO_PENDING)
+            {
+                printf("ReadFile failed: %d\n", result);
+                continue;
+            }
+            else
+            {
+                result = WaitForSingleObject(overlapped.hEvent, INFINITE);
+                if (GetOverlappedResult(fileData[i].FileHandle,
+                                        &overlapped,
+                                        &bytesRead,
+                                        FALSE) == FALSE)
+                {
+                    result = GetLastError();
+                    printf("Failed reading file: %d\n", result);
+                    continue;
+                }
+            }
         }
         fileData[i].SumOfBytes = 0;
         for (PBYTE b = (PBYTE)fileData[i].Buffer; (ULONG64)b < (ULONG64)(fileData[i].Buffer) + sizeToRead; b++)
@@ -280,9 +472,16 @@ void LegacyReadFile()
 Exit:
     if (fileData)
     {
-        for (int i = 0; i < numberOfEntries; i++)
+        if ((ReadMultipleFiles == FALSE) && (fileData[0].FileHandle))
         {
-            if (fileData[i].FileHandle)
+            //
+            // Only close the handle once
+            //
+            NtClose(fileData[0].FileHandle);
+        }
+        for (ULONG i = 0; i < numberOfEntries; i++)
+        {
+            if ((ReadMultipleFiles != FALSE) & (fileData[i].FileHandle != 0))
             {
                 NtClose(fileData[i].FileHandle);
             }
@@ -295,42 +494,59 @@ Exit:
     }
 }
 
-void LegacyReadFileEx()
+void
+LegacyReadFileEx (
+    _In_ BOOLEAN ReadMultipleFiles
+    )
 {
     ULONG sizeToRead = 0x100000;
     PFILE_DATA fileData;
     ULONG numberOfEntries;
-    ULONG bytesRead;
-    BOOL result;
-    OVERLAPPED overlapped;
+    HRESULT result;
+    OVERLAPPED overlapped{ 0 };
     __int64 start;
     __int64 end;
     ULONG64 sum;
 
-    fileData = (PFILE_DATA)VirtualAlloc(NULL, 0x10000 * sizeof(FILE_DATA), MEM_COMMIT, PAGE_READWRITE);
-    if (fileData == NULL)
+    numberOfEntries = 5000;
+    result = CreateListOfFiles(sizeToRead,
+                               numberOfEntries,
+                               &numberOfEntries,
+                               &fileData,
+                               TRUE,
+                               ReadMultipleFiles);
+    if (!SUCCEEDED(result))
     {
-        printf("Failed allocating memory\n");
+        printf("failed to create list of file handles");
         goto Exit;
     }
-    CreateListOfFiles(sizeToRead, &fileData, &numberOfEntries, TRUE);
 
     start = __rdtsc();
-    for (int i = 0; i < numberOfEntries; i++)
+    for (ULONG i = 0; i < numberOfEntries; i++)
     {
-        overlapped = { 0 };
-        result = ReadFileEx(fileData[i].FileHandle, fileData[i].Buffer, sizeToRead, &overlapped, CompletionRoutine);
-        if (result == FALSE)
+        overlapped.InternalHigh = fileData[i].Offset.HighPart;
+        overlapped.Internal = fileData[i].Offset.LowPart;
+        if (ReadFileEx(fileData[i].FileHandle, fileData[i].Buffer, sizeToRead, &overlapped, CompletionRoutine) == FALSE)
         {
             printf("ReadFileEx failed\n");
         }
     }
-    while (g_filesCompleted < numberOfEntries)
+    if (ReadMultipleFiles != FALSE)
     {
-        SleepEx(1, TRUE);
+        while (g_filesCompleted < numberOfEntries)
+        {
+            SleepEx(1, TRUE);
+        }
+    }
+    else
+    {
+        while (g_filesCompleted < 1)
+        {
+            SleepEx(1, TRUE);
+        }
     }
     sum = 0;
-    for (int i = 0; i < numberOfEntries; i++)
+    for (ULONG i = 0; i < numberOfEntries; i++)
     {
         fileData[i].SumOfBytes = 0;
         for (PBYTE b = (PBYTE)fileData[i].Buffer; (ULONG64)b < (ULONG64)(fileData[i].Buffer) + sizeToRead; b++)
@@ -347,9 +563,16 @@ void LegacyReadFileEx()
 Exit:
     if (fileData)
     {
-        for (int i = 0; i < numberOfEntries; i++)
+        if ((ReadMultipleFiles == FALSE) && (fileData[0].FileHandle))
         {
-            if (fileData[i].FileHandle)
+            //
+            // Only close the handle once
+            //
+            NtClose(fileData[0].FileHandle);
+        }
+        for (ULONG i = 0; i < numberOfEntries; i++)
+        {
+            if ((ReadMultipleFiles != FALSE) & (fileData[i].FileHandle != 0))
             {
                 NtClose(fileData[i].FileHandle);
             }
@@ -362,10 +585,13 @@ Exit:
     }
 }
 
-
-void IoRingNt()
+void
+IoRingNt (
+    _In_ BOOLEAN ReadMultipleFiles
+    )
 {
     NTSTATUS status;
+    HRESULT result;
     IO_RING_STRUCTV1 ioringStruct;
     NT_IORING_INFO ioringInfo;
     HANDLE handle = NULL;
@@ -374,7 +600,6 @@ void IoRingNt()
     HANDLE hFile = NULL;
     ULONG sizeToRead = 0x100000;
     PVOID* buffer = NULL;
-    ULONG64 endOfBuffer;
     PFILE_DATA fileData;
     ULONG numberOfEntries;
     ULONG64 sum;
@@ -382,13 +607,18 @@ void IoRingNt()
     __int64 start;
     __int64 end;
 
-    fileData = (PFILE_DATA)VirtualAlloc(NULL, 0x10000 * sizeof(FILE_DATA), MEM_COMMIT, PAGE_READWRITE);
-    if (fileData == NULL)
+    numberOfEntries = 5000;
+    result = CreateListOfFiles(sizeToRead,
+                               numberOfEntries,
+                               &numberOfEntries,
+                               &fileData,
+                               TRUE,
+                               ReadMultipleFiles);
+    if (!SUCCEEDED(result))
     {
-        printf("Failed allocating memory\n");
+        printf("failed to create list of file handles");
         goto Exit;
     }
-    CreateListOfFiles(sizeToRead, &fileData, &numberOfEntries, TRUE);
 
     ioringStruct.IoRingVersion = 1;
     ioringStruct.SubmissionQueueSize = 0x10000;
@@ -412,12 +642,12 @@ void IoRingNt()
 
     sqe = (PNT_IORING_SQE)((ULONG64)ioringInfo.SubQueueBase + sizeof(IORING_QUEUE_HEAD));
 
-    for (int i = 0; i < numberOfEntries; i++)
+    for (ULONG i = 0; i < numberOfEntries; i++)
     {
         sqe[i].OpCode = 1;
         sqe[i].Flags = 0;
         sqe[i].FileRef = fileData[i].FileHandle;
-        sqe[i].Offset = 0;
+        sqe[i].Offset = fileData[i].Offset.QuadPart;
         sqe[i].Buffer = fileData[i].Buffer;
         sqe[i].Length = sizeToRead;
         sqe[i].Key = 1234;
@@ -427,7 +657,7 @@ void IoRingNt()
     timeout.QuadPart = 0;
 
     start = __rdtsc();
-    status = NtSubmitIoRing(handle, IORING_CREATE_REQUIRED_FLAGS_NONE, numberOfEntries, &timeout);
+    status = NtSubmitIoRing(handle, IORING_CREATE_REQUIRED_FLAGS_NONE, 0, &timeout);
     if (!NT_SUCCESS(status))
     {
         printf("Failed submitting IO ring: 0x%x\n", status);
@@ -462,9 +692,16 @@ Exit:
     }
     if (fileData)
     {
-        for (int i = 0; i < numberOfEntries; i++)
+        if ((ReadMultipleFiles == FALSE) && (fileData[0].FileHandle))
         {
-            if (fileData[i].FileHandle)
+            //
+            // Only close the handle once
+            //
+            NtClose(fileData[0].FileHandle);
+        }
+        for (ULONG i = 0; i < numberOfEntries; i++)
+        {
+            if ((ReadMultipleFiles != FALSE) & (fileData[i].FileHandle != 0))
             {
                 NtClose(fileData[i].FileHandle);
             }
@@ -477,7 +714,10 @@ Exit:
     }
 }
 
-void IoRingKernelBase()
+void
+IoRingKernelBase (
+    _In_ BOOLEAN ReadMultipleFiles
+    )
 {
     HRESULT result;
     HIORING handle = NULL;
@@ -488,20 +728,14 @@ void IoRingKernelBase()
     HANDLE hFile = NULL;
     ULONG sizeToRead = 0x100000;
     PVOID buffer = NULL;
-    ULONG64 endOfBuffer;
     PFILE_DATA fileData;
     ULONG numberOfEntries = 0;
     IORING_CQE cqe;
     ULONG64 sum;
     __int64 start;
     __int64 end;
-    
-    fileData = (PFILE_DATA)VirtualAlloc(NULL, 0x10000 * sizeof(FILE_DATA), MEM_COMMIT, PAGE_READWRITE);
-    if (fileData == NULL)
-    {
-        printf("Failed allocating memory\n");
-        goto Exit;
-    }
+
+    fileData = nullptr;
 
     flags.Required = IORING_CREATE_REQUIRED_FLAGS_NONE;
     flags.Advisory = IORING_CREATE_ADVISORY_FLAGS_NONE;
@@ -512,8 +746,19 @@ void IoRingKernelBase()
         goto Exit;
     }
 
-    CreateListOfFiles(sizeToRead, &fileData, &numberOfEntries, TRUE);
-    for (int i = 0; i < numberOfEntries; i++)
+    numberOfEntries = 5000;
+    result = CreateListOfFiles(sizeToRead,
+                               numberOfEntries,
+                               &numberOfEntries,
+                               &fileData,
+                               TRUE,
+                               ReadMultipleFiles);
+    if (!SUCCEEDED(result))
+    {
+        printf("failed to create list of file handles");
+        goto Exit;
+    }
+    for (ULONG i = 0; i < numberOfEntries; i++)
     {
         requestDataFile = IoRingHandleRefFromHandle(fileData[i].FileHandle);
         requestDataBuffer = IoRingBufferRefFromPointer(fileData[i].Buffer);
@@ -541,7 +786,7 @@ void IoRingKernelBase()
         goto Exit;
     }
     sum = 0;
-    for (int i = 0; i < submittedEntries; i++)
+    for (ULONG i = 0; i < submittedEntries; i++)
     {
         result = PopIoRingCompletion(handle, &cqe);
         if (cqe.ResultCode == STATUS_SUCCESS)
@@ -553,7 +798,6 @@ void IoRingKernelBase()
             sum += fileData[i].SumOfBytes;
         }
     }
-
     end = __rdtsc();
     printf("time IO Ring KernelBase: %lld\n", end - start);
     printf("\tSum: %lld\n", sum);
@@ -565,13 +809,20 @@ Exit:
     }
     if (fileData)
     {
-        for (int i = 0; i < numberOfEntries; i++)
+        if ((ReadMultipleFiles == FALSE) && (fileData[0].FileHandle))
         {
-            if (fileData[i].FileHandle)
+            //
+            // Only close the handle once
+            //
+            NtClose(fileData[0].FileHandle);
+        }
+        for (ULONG i = 0; i < numberOfEntries; i++)
+        {
+            if ((ReadMultipleFiles != FALSE) & (fileData[i].FileHandle != 0))
             {
                 NtClose(fileData[i].FileHandle);
             }
-            if (fileData[i].Buffer)
+            if (fileData[i].Buffer != NULL)
             {
                 VirtualFree(fileData[i].Buffer, NULL, MEM_RELEASE);
             }
@@ -582,11 +833,13 @@ Exit:
 
 int main()
 {
-    LegacyReadFile();
-    LegacyReadFileEx();
-    IoRingKernelBase();
-    IoRingNt();
-    LegacyNtReadFile();
+    BOOLEAN ReadMultipleFiles = FALSE;
+
+    LegacyReadFile(ReadMultipleFiles);
+    LegacyReadFileEx(ReadMultipleFiles);
+    IoRingKernelBase(ReadMultipleFiles);
+    IoRingNt(ReadMultipleFiles);
+    LegacyNtReadFile(ReadMultipleFiles);
 
     ExitProcess(0);
 }
